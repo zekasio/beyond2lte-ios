@@ -41,7 +41,7 @@ jobs:
       - name: Install toolchain dependencies
         run: |
           brew update
-          brew install llvm lld nasm acpica rsync jq p7zip
+          brew install llvm lld nasm acpica rsync jq blacktop/tap/ipsw
           LLVM_PREFIX="$(brew --prefix llvm)"
           LLD_PREFIX="$(brew --prefix lld)"
           mkdir -p out/llvm-bin
@@ -109,17 +109,53 @@ jobs:
             if [[ -z "$IPSW_URL" ]]; then
               IPSW_URL="$(curl -fsSL "https://api.ipsw.me/v4/device/iPhone17,2?type=ipsw" | python3 -c "import sys,json; d=json.load(sys.stdin); print(next(f['url'] for f in d['firmwares'] if f['version']=='26.5'))")"
             fi
-            echo "Downloading IPSW from $IPSW_URL"
-            curl -fSL "$IPSW_URL" -o out/ipsw/restore.ipsw
-            ROOT_DMG_NAME="$(7z l -slt out/ipsw/restore.ipsw | awk -F' = ' '/^Path = /{p=$2} /^Size = /{if(p ~ /\.dmg$/ && $2+0 > max){max=$2+0; best=p}} END{print best}')"
-            if [[ -z "$ROOT_DMG_NAME" ]]; then
-              echo "::error::Could not locate root filesystem DMG inside IPSW"
-              exit 1
+            echo "Resolving rootfs DMG from $IPSW_URL"
+            mkdir -p out/ipsw/extracted
+            ROOT_FILE="$(python3 -c '
+            import io, os, shutil, sys, urllib.request, zipfile
+
+            url, out_dir = sys.argv[1], sys.argv[2]
+
+            class RemoteFile(io.RawIOBase):
+                def __init__(self, url, size):
+                    self.url, self.size, self.pos = url, size, 0
+                def readable(self): return True
+                def seekable(self): return True
+                def seek(self, offset, whence=0):
+                    if whence == 0: self.pos = offset
+                    elif whence == 1: self.pos += offset
+                    elif whence == 2: self.pos = self.size + offset
+                    return self.pos
+                def tell(self): return self.pos
+                def read(self, n=-1):
+                    if n == -1: n = self.size - self.pos
+                    if n <= 0 or self.pos >= self.size: return b""
+                    end = min(self.size - 1, self.pos + n - 1)
+                    req = urllib.request.Request(self.url, headers={"Range": f"bytes={self.pos}-{end}"})
+                    with urllib.request.urlopen(req) as r:
+                        data = r.read()
+                    self.pos += len(data)
+                    return data
+
+            with urllib.request.urlopen(urllib.request.Request(url, method="HEAD")) as r:
+                size = int(r.headers["Content-Length"])
+            with zipfile.ZipFile(RemoteFile(url, size)) as zf:
+                dmgs = [i for i in zf.infolist() if i.filename.endswith((".dmg", ".dmg.aea"))]
+                best = max(dmgs, key=lambda i: i.file_size)
+                out_path = os.path.join(out_dir, os.path.basename(best.filename))
+                with zf.open(best) as src, open(out_path, "wb") as dst:
+                    shutil.copyfileobj(src, dst, length=8 * 1024 * 1024)
+                print(out_path)
+            ' "$IPSW_URL" out/ipsw/extracted)"
+            echo "Extracted $ROOT_FILE"
+            if [[ "$ROOT_FILE" == *.aea ]]; then
+              ipsw fw aea "$ROOT_FILE" -o out/ipsw/extracted
+              rm -f "$ROOT_FILE"
+              ROOT_DMG="$(find out/ipsw/extracted -maxdepth 2 -name '*.dmg' | head -n 1)"
+            else
+              ROOT_DMG="$ROOT_FILE"
             fi
-            echo "Extracting $ROOT_DMG_NAME from IPSW"
-            7z x out/ipsw/restore.ipsw "$ROOT_DMG_NAME" -oout/ipsw/extracted -y
-            rm -f out/ipsw/restore.ipsw
-            ROOT_DMG="out/ipsw/extracted/$ROOT_DMG_NAME"
+            test -f "$ROOT_DMG"
             MNT_SRC="$(mktemp -d)"
             MNT_DST="$(mktemp -d)"
             hdiutil attach "$ROOT_DMG" -mountpoint "$MNT_SRC" -nobrowse -readonly -owners on
