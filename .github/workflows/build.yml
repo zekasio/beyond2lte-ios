@@ -1,0 +1,227 @@
+name: Build beyond2lte XNU + UEFI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      enable_touch:
+        description: "Enable B2LTouchDxe in firmware profile"
+        type: boolean
+        default: false
+
+env:
+  XNU_COMMIT: ac9718fb1af618d5ce8678d0dc6e8a58f252216f
+  AVAILABILITY_COMMIT: 149b1777f3e8c2133042d8e188f72e3adf6a7110
+  LIBDISPATCH_COMMIT: 701f4d1a24ae9c6863901bbbb22624b7d1b87321
+  MU_SILICIUM_COMMIT: 2147dec93fc293ec85b1814a828816130d6f93b7
+  MU_BASECORE_COMMIT: 762a65dad79e2934cddbefa467b7e2c7b5ee4bc0
+  BEYOND2LTE_UEFI_COMMIT: 48add5bb03ab6f7ee4eb5aa04a30366e6dde6ba3
+
+jobs:
+  build:
+    name: Build XNU, UEFI Firmware, and boot.img
+    runs-on: macos-15
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout beyond2lte-ios
+        uses: actions/checkout@v4
+
+      - name: Set up workspace paths and environment
+        run: |
+          mkdir -p out/kdk out/deps out/build-env out/ipsw out/mu out/ci-boot
+          echo "KDKROOT=$GITHUB_WORKSPACE/out/kdk" >> "$GITHUB_ENV"
+          echo "B2L_DEPSROOT=$GITHUB_WORKSPACE/out/deps" >> "$GITHUB_ENV"
+          echo "B2L_BUILD_ENV=$GITHUB_WORKSPACE/out/build-env" >> "$GITHUB_ENV"
+          echo "MU_WORK_TREE=$GITHUB_WORKSPACE/out/mu" >> "$GITHUB_ENV"
+          echo "BUILD_JOBS=$(sysctl -n hw.ncpu)" >> "$GITHUB_ENV"
+
+      - name: Install toolchain dependencies
+        run: |
+          brew update
+          brew install llvm nasm acpica rsync jq p7zip
+          LLVM_PREFIX="$(brew --prefix llvm)"
+          echo "CLANG_BIN=$LLVM_PREFIX/bin" >> "$GITHUB_ENV"
+          echo "$LLVM_PREFIX/bin" >> "$GITHUB_PATH"
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pyopenssl
+
+      - name: Verify Xcode SDKs
+        run: |
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-path
+          xcrun --sdk iphoneos --show-sdk-path
+
+      - name: Download and stage KDK (26.5 build 25F71)
+        env:
+          KDK_URL: ${{ secrets.KDK_URL }}
+        run: |
+          if [[ -z "$KDK_URL" ]]; then
+            echo "::error::secrets.KDK_URL is required (URL to Kernel Debug Kit 26.5 build 25F71 DMG or tar.zst/tar.gz)"
+            exit 1
+          fi
+          curl -fSL "$KDK_URL" -o out/kdk-download
+          if file out/kdk-download | grep -qiE 'apple|dmg|zlib|bzip2|udif'; then
+            MOUNT_DIR="$(mktemp -d)"
+            hdiutil attach out/kdk-download -mountpoint "$MOUNT_DIR" -nobrowse -readonly
+            trap 'hdiutil detach "$MOUNT_DIR" -force || true' EXIT
+            pkg_root="$(mktemp -d)"
+            pkgutil --expand-full "$MOUNT_DIR/KernelDebugKit.pkg" "$pkg_root/expanded" || true
+            for sub in KDK.pkg KDK_SDK.pkg; do
+              if [[ -d "$pkg_root/expanded/$sub/Payload" ]]; then
+                rsync -a "$pkg_root/expanded/$sub/Payload/" "$KDKROOT/"
+              elif [[ -f "$MOUNT_DIR/$sub" ]]; then
+                pkgutil --expand-full "$MOUNT_DIR/$sub" "$pkg_root/$sub"
+                rsync -a "$pkg_root/$sub/Payload/" "$KDKROOT/"
+              fi
+            done
+          else
+            tar -xf out/kdk-download -C "$KDKROOT"
+          fi
+          rm -f out/kdk-download
+          test -d "$KDKROOT/System/Library/Frameworks/Kernel.framework"
+
+      - name: Download or prepare IPSW / HFS userspace image
+        env:
+          USERDATA_HFS_URL: ${{ secrets.USERDATA_HFS_URL }}
+          IPSW_URL: ${{ secrets.IPSW_URL }}
+        run: |
+          mkdir -p out/ipsw
+          if [[ -n "$USERDATA_HFS_URL" ]]; then
+            curl -fSL "$USERDATA_HFS_URL" -o out/ipsw/ios26-userdata.hfs.img
+          elif [[ -n "$IPSW_URL" ]]; then
+            curl -fSL "$IPSW_URL" -o out/ipsw/restore.ipsw
+            7z x out/ipsw/restore.ipsw -oout/ipsw/extracted -y
+            ROOT_DMG="$(find out/ipsw/extracted -maxdepth 2 -name '*.dmg' -size +1G | head -n 1)"
+            if [[ -z "$ROOT_DMG" ]]; then
+              echo "::error::Could not locate root filesystem DMG inside IPSW"
+              exit 1
+            fi
+            MNT_SRC="$(mktemp -d)"
+            MNT_DST="$(mktemp -d)"
+            hdiutil attach "$ROOT_DMG" -mountpoint "$MNT_SRC" -nobrowse -readonly -owners on
+            hdiutil create -size 32g -fs "Case-sensitive Journaled HFS+" -volname "B2LRoot" -layout NONE -type UDIF out/ipsw/ios26-userdata.hfs.dmg
+            mv out/ipsw/ios26-userdata.hfs.dmg out/ipsw/ios26-userdata.hfs.img
+            hdiutil attach out/ipsw/ios26-userdata.hfs.img -mountpoint "$MNT_DST" -nobrowse -owners on
+            sudo rsync -aHAX --numeric-ids "$MNT_SRC/" "$MNT_DST/" || true
+            sudo python3 scripts/prepare-ios-root.py "$MNT_DST" --verify || true
+            hdiutil detach "$MNT_DST" -force || true
+            hdiutil detach "$MNT_SRC" -force || true
+            rm -rf out/ipsw/restore.ipsw out/ipsw/extracted
+          else
+            echo "::error::Set secrets.USERDATA_HFS_URL or secrets.IPSW_URL so build-userspace-bootstrap.py can read /System/Library/xpc/launchd.plist"
+            exit 1
+          fi
+          test -f out/ipsw/ios26-userdata.hfs.img
+
+      - name: Fetch and prepare Mu-Silicium + beyond2lte platform overlay
+        env:
+          MU_SILICIUM_URL: ${{ secrets.MU_SILICIUM_URL || 'https://github.com/Project-Silicium/Mu-Silicium.git' }}
+          BEYOND2LTE_UEFI_URL: ${{ secrets.BEYOND2LTE_UEFI_URL || 'https://github.com/orhunnx/UEFI_beyond2lte.git' }}
+        run: |
+          git clone "$MU_SILICIUM_URL" "$MU_WORK_TREE"
+          git -C "$MU_WORK_TREE" checkout --detach "$MU_SILICIUM_COMMIT"
+          git -C "$MU_WORK_TREE" submodule update --init --recursive
+          actual_basecore="$(git -C "$MU_WORK_TREE/Mu_Basecore" rev-parse HEAD)"
+          echo "Mu_Basecore at $actual_basecore (expected $MU_BASECORE_COMMIT)"
+
+          git clone "$BEYOND2LTE_UEFI_URL" out/uefi-beyond2lte
+          git -C out/uefi-beyond2lte checkout --detach "$BEYOND2LTE_UEFI_COMMIT"
+          if [[ -d out/uefi-beyond2lte/Platforms/Samsung/beyond2ltePkg ]]; then
+            rsync -a out/uefi-beyond2lte/Platforms/Samsung/ "$MU_WORK_TREE/Platforms/Samsung/"
+          fi
+          if [[ -d out/uefi-beyond2lte/Silicon/Samsung ]]; then
+            rsync -a out/uefi-beyond2lte/Silicon/Samsung/ "$MU_WORK_TREE/Silicon/Samsung/"
+          fi
+          if [[ -d out/uefi-beyond2lte/Resources ]]; then
+            rsync -a out/uefi-beyond2lte/Resources/ "$MU_WORK_TREE/Resources/"
+          fi
+          if [[ -d out/uefi-beyond2lte/BootShim ]]; then
+            rsync -a out/uefi-beyond2lte/BootShim/ "$MU_WORK_TREE/BootShim/"
+          fi
+
+          make -C "$MU_WORK_TREE/Mu_Basecore/BaseTools/Source/C" -j"$BUILD_JOBS"
+
+      - name: Fetch and prepare XNU source
+        run: |
+          scripts/fetch-xnu.sh "$GITHUB_WORKSPACE/xnu"
+          scripts/prepare-xnu.sh "$GITHUB_WORKSPACE/xnu"
+
+      - name: Build AvailabilityVersions and libfirehose_kernel dependencies
+        run: |
+          mkdir -p "$B2L_BUILD_ENV/src" "$B2L_DEPSROOT/usr/local/libexec" \
+            "$B2L_DEPSROOT/usr/local/include/firehose" "$B2L_DEPSROOT/usr/local/include/os" \
+            "$B2L_DEPSROOT/usr/local/include/kernel/firehose" "$B2L_DEPSROOT/usr/local/include/kernel/os" \
+            "$B2L_DEPSROOT/usr/local/lib/kernel"
+
+          git init -q "$B2L_BUILD_ENV/src/AvailabilityVersions"
+          git -C "$B2L_BUILD_ENV/src/AvailabilityVersions" fetch -q --depth 1 https://github.com/apple-oss-distributions/AvailabilityVersions.git "$AVAILABILITY_COMMIT"
+          git -C "$B2L_BUILD_ENV/src/AvailabilityVersions" checkout -q FETCH_HEAD
+          make -C "$B2L_BUILD_ENV/src/AvailabilityVersions" install DSTROOT="$B2L_DEPSROOT"
+
+          git init -q "$B2L_BUILD_ENV/src/libdispatch"
+          git -C "$B2L_BUILD_ENV/src/libdispatch" fetch -q --depth 1 https://github.com/apple-oss-distributions/libdispatch.git "$LIBDISPATCH_COMMIT"
+          git -C "$B2L_BUILD_ENV/src/libdispatch" checkout -q FETCH_HEAD
+
+          make -C "$GITHUB_WORKSPACE/xnu" SDKROOT=macosx KDKROOT="$KDKROOT" \
+            ARCH_CONFIGS=ARM64 TARGET_CONFIGS="DEVELOPMENT ARM64 B2L" \
+            PLATFORM=iPhoneOS PLATFORM_FOR_CONFIG=iPhoneOS SDKVERSION=26.5 \
+            OBJROOT="$GITHUB_WORKSPACE/out/xnu-hdrs/obj" \
+            SYMROOT="$GITHUB_WORKSPACE/out/xnu-hdrs/sym" \
+            DSTROOT="$B2L_DEPSROOT" installhdrs || true
+
+          rsync -a "$B2L_BUILD_ENV/src/libdispatch/private/firehose/" "$B2L_DEPSROOT/usr/local/include/firehose/" 2>/dev/null || true
+          rsync -a "$B2L_BUILD_ENV/src/libdispatch/os/" "$B2L_DEPSROOT/usr/local/include/os/" 2>/dev/null || true
+          rsync -a "$B2L_DEPSROOT/usr/local/include/firehose/" "$B2L_DEPSROOT/usr/local/include/kernel/firehose/" 2>/dev/null || true
+          rsync -a "$B2L_DEPSROOT/usr/local/include/os/" "$B2L_DEPSROOT/usr/local/include/kernel/os/" 2>/dev/null || true
+
+          cat > "$B2L_BUILD_ENV/env.sh" <<EOF
+          export KDKROOT="$KDKROOT"
+          export B2L_DEPSROOT="$B2L_DEPSROOT"
+          EOF
+          scripts/build-firehose.sh
+
+      - name: Run host loader tests (ASan/UBSan)
+        run: scripts/test-loader.sh
+
+      - name: Build XNU kernel (DEVELOPMENT ARM64 B2L)
+        run: |
+          scripts/build-kernel.sh CWARNFLAGS=-w CXXWARNFLAGS=-w
+
+      - name: Build UEFI loader and beyond2lte firmware profile
+        env:
+          B2L_ENABLE_TOUCH: ${{ inputs.enable_touch && '1' || '0' }}
+        run: |
+          WORKSPACE="$MU_WORK_TREE" scripts/build-boot-firmware.sh
+
+      - name: Package and verify boot.img
+        run: |
+          KERNEL_PATH="$(find out/xnu/obj -name 'mach.development.b2l' -type f | head -n 1)"
+          FD_PATH="$(find "$MU_WORK_TREE/Build" -name '*.fd' -type f | head -n 1)"
+          LOADER_PATH="$MU_WORK_TREE/Build/B2LXnu/RELEASE_CLANGPDB/AARCH64/XnuLoader.efi"
+          test -f "$KERNEL_PATH"
+          test -f "$FD_PATH"
+          test -f "$LOADER_PATH"
+
+          python3 scripts/package-boot.py \
+            --mu "$MU_WORK_TREE" \
+            --firmware "$FD_PATH" \
+            --kernel "$KERNEL_PATH" \
+            --loader "$LOADER_PATH" \
+            --output-dir out/ci-boot \
+            --max-image-bytes 67108864
+
+          python3 scripts/package-boot.py --verify out/ci-boot/boot.img
+
+      - name: Upload boot.img and disk images as artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: beyond2lte-xnu-artifacts
+          path: |
+            out/ci-boot/boot.img
+            out/ci-boot/manifest.json
+            out/ci-boot/beyond2lte-xnu-boot.tar
+            out/ipsw/*.img
+          if-no-files-found: error
