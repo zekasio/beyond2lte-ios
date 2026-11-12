@@ -41,12 +41,19 @@ jobs:
       - name: Install toolchain dependencies
         run: |
           brew update
-          brew install llvm nasm acpica rsync jq p7zip
+          brew install llvm lld nasm acpica rsync jq p7zip
           LLVM_PREFIX="$(brew --prefix llvm)"
-          echo "CLANG_BIN=$LLVM_PREFIX/bin" >> "$GITHUB_ENV"
-          echo "$LLVM_PREFIX/bin" >> "$GITHUB_PATH"
-          python3 -m pip install --upgrade pip
-          python3 -m pip install pyopenssl
+          LLD_PREFIX="$(brew --prefix lld)"
+          mkdir -p out/llvm-bin
+          ln -sf "$LLVM_PREFIX/bin/"* out/llvm-bin/
+          ln -sf "$LLD_PREFIX/bin/lld-link" out/llvm-bin/lld-link
+          ln -sf "$LLD_PREFIX/bin/ld.lld" out/llvm-bin/ld.lld
+          echo "CLANG_BIN=$GITHUB_WORKSPACE/out/llvm-bin" >> "$GITHUB_ENV"
+          echo "$GITHUB_WORKSPACE/out/llvm-bin" >> "$GITHUB_PATH"
+          python3 -m venv out/venv
+          echo "PYTHON_COMMAND=$GITHUB_WORKSPACE/out/venv/bin/python" >> "$GITHUB_ENV"
+          echo "$GITHUB_WORKSPACE/out/venv/bin" >> "$GITHUB_PATH"
+          out/venv/bin/python -m pip install --upgrade pip pyopenssl
 
       - name: Verify Xcode SDKs
         run: |
