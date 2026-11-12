@@ -61,6 +61,14 @@ jobs:
           xcrun --sdk macosx --show-sdk-path
           xcrun --sdk iphoneos --show-sdk-path
 
+      - name: Cache KDK and HFS userspace image
+        uses: actions/cache@v4
+        with:
+          path: |
+            out/kdk
+            out/ipsw/ios26-userdata.hfs.img
+          key: b2l-ios265-25f71-v1
+
       - name: Download and stage KDK (26.5 build 25F71)
         env:
           KDK_URL: ${{ secrets.KDK_URL }}
