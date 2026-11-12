@@ -61,8 +61,9 @@ jobs:
           xcrun --sdk macosx --show-sdk-path
           xcrun --sdk iphoneos --show-sdk-path
 
-      - name: Cache KDK and HFS userspace image
-        uses: actions/cache@v4
+      - name: Restore KDK and HFS userspace image cache
+        id: cache-kdk-hfs
+        uses: actions/cache/restore@v4
         with:
           path: |
             out/kdk
@@ -180,6 +181,15 @@ jobs:
           fi
           test -f out/ipsw/ios26-userdata.hfs.img
           df -h
+
+      - name: Save KDK and HFS userspace image cache
+        if: always() && steps.cache-kdk-hfs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            out/kdk
+            out/ipsw/ios26-userdata.hfs.img
+          key: b2l-ios265-25f71-v1
 
       - name: Fetch and prepare Mu-Silicium + beyond2lte platform overlay
         env:
