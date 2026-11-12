@@ -70,12 +70,15 @@ jobs:
           fi
           echo "Downloading KDK from $KDK_URL"
           curl -fSL "$KDK_URL" -o out/kdk-download
-          if file out/kdk-download | grep -qiE 'apple|dmg|zlib|bzip2|udif'; then
+          if [[ "$KDK_URL" == *.dmg* ]] || hdiutil imageinfo out/kdk-download >/dev/null 2>&1; then
+            mv out/kdk-download out/kdk-download.dmg
             MOUNT_DIR="$(mktemp -d)"
-            hdiutil attach out/kdk-download -mountpoint "$MOUNT_DIR" -nobrowse -readonly
+            hdiutil attach out/kdk-download.dmg -mountpoint "$MOUNT_DIR" -nobrowse -readonly
             trap 'hdiutil detach "$MOUNT_DIR" -force || true' EXIT
+            ls -la "$MOUNT_DIR"
             pkg_root="$(mktemp -d)"
-            pkgutil --expand-full "$MOUNT_DIR/KernelDebugKit.pkg" "$pkg_root/expanded" || true
+            PKG_FILE="$(find "$MOUNT_DIR" -maxdepth 1 -name '*.pkg' | head -n 1)"
+            pkgutil --expand-full "$PKG_FILE" "$pkg_root/expanded" || true
             for sub in KDK.pkg KDK_SDK.pkg; do
               if [[ -d "$pkg_root/expanded/$sub/Payload" ]]; then
                 rsync -a "$pkg_root/expanded/$sub/Payload/" "$KDKROOT/"
@@ -84,10 +87,13 @@ jobs:
                 rsync -a "$pkg_root/$sub/Payload/" "$KDKROOT/"
               fi
             done
+            if [[ ! -d "$KDKROOT/System/Library/Frameworks/Kernel.framework" ]] && [[ -d "$pkg_root/expanded/Payload" ]]; then
+              rsync -a "$pkg_root/expanded/Payload/" "$KDKROOT/"
+            fi
           else
             tar -xf out/kdk-download -C "$KDKROOT"
           fi
-          rm -f out/kdk-download
+          rm -f out/kdk-download out/kdk-download.dmg
           test -d "$KDKROOT/System/Library/Frameworks/Kernel.framework"
 
       - name: Download or prepare IPSW / HFS userspace image
