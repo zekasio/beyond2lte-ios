@@ -184,20 +184,7 @@ jobs:
           actual_basecore="$(git -C "$MU_WORK_TREE/Mu_Basecore" rev-parse HEAD)"
           echo "Mu_Basecore at $actual_basecore (expected $MU_BASECORE_COMMIT)"
 
-          git clone "$BEYOND2LTE_UEFI_URL" out/uefi-beyond2lte
-          git -C out/uefi-beyond2lte checkout --detach "$BEYOND2LTE_UEFI_COMMIT"
-          if [[ -d out/uefi-beyond2lte/Platforms/Samsung/beyond2ltePkg ]]; then
-            rsync -a out/uefi-beyond2lte/Platforms/Samsung/ "$MU_WORK_TREE/Platforms/Samsung/"
-          fi
-          if [[ -d out/uefi-beyond2lte/Silicon/Samsung ]]; then
-            rsync -a out/uefi-beyond2lte/Silicon/Samsung/ "$MU_WORK_TREE/Silicon/Samsung/"
-          fi
-          if [[ -d out/uefi-beyond2lte/Resources ]]; then
-            rsync -a out/uefi-beyond2lte/Resources/ "$MU_WORK_TREE/Resources/"
-          fi
-          if [[ -d out/uefi-beyond2lte/BootShim ]]; then
-            rsync -a out/uefi-beyond2lte/BootShim/ "$MU_WORK_TREE/BootShim/"
-          fi
+          ls -la "$MU_WORK_TREE/Platforms/Samsung/"
 
           make -C "$MU_WORK_TREE/Mu_Basecore/BaseTools/Source/C" -j"$BUILD_JOBS"
 
