@@ -66,9 +66,9 @@ jobs:
           KDK_URL: ${{ secrets.KDK_URL }}
         run: |
           if [[ -z "$KDK_URL" ]]; then
-            echo "::error::secrets.KDK_URL is required (URL to Kernel Debug Kit 26.5 build 25F71 DMG or tar.zst/tar.gz)"
-            exit 1
+            KDK_URL="https://github.com/dortania/KdkSupportPkg/releases/download/25F71/Kernel_Debug_Kit_26.5_build_25F71.dmg"
           fi
+          echo "Downloading KDK from $KDK_URL"
           curl -fSL "$KDK_URL" -o out/kdk-download
           if file out/kdk-download | grep -qiE 'apple|dmg|zlib|bzip2|udif'; then
             MOUNT_DIR="$(mktemp -d)"
@@ -95,33 +95,41 @@ jobs:
           USERDATA_HFS_URL: ${{ secrets.USERDATA_HFS_URL }}
           IPSW_URL: ${{ secrets.IPSW_URL }}
         run: |
+          df -h
           mkdir -p out/ipsw
           if [[ -n "$USERDATA_HFS_URL" ]]; then
             curl -fSL "$USERDATA_HFS_URL" -o out/ipsw/ios26-userdata.hfs.img
-          elif [[ -n "$IPSW_URL" ]]; then
+          else
+            if [[ -z "$IPSW_URL" ]]; then
+              IPSW_URL="$(curl -fsSL "https://api.ipsw.me/v4/device/iPhone17,2?type=ipsw" | python3 -c "import sys,json; d=json.load(sys.stdin); print(next(f['url'] for f in d['firmwares'] if f['version']=='26.5'))")"
+            fi
+            echo "Downloading IPSW from $IPSW_URL"
             curl -fSL "$IPSW_URL" -o out/ipsw/restore.ipsw
-            7z x out/ipsw/restore.ipsw -oout/ipsw/extracted -y
-            ROOT_DMG="$(find out/ipsw/extracted -maxdepth 2 -name '*.dmg' -size +1G | head -n 1)"
-            if [[ -z "$ROOT_DMG" ]]; then
+            ROOT_DMG_NAME="$(7z l -slt out/ipsw/restore.ipsw | awk -F' = ' '/^Path = /{p=$2} /^Size = /{if(p ~ /\.dmg$/ && $2+0 > max){max=$2+0; best=p}} END{print best}')"
+            if [[ -z "$ROOT_DMG_NAME" ]]; then
               echo "::error::Could not locate root filesystem DMG inside IPSW"
               exit 1
             fi
+            echo "Extracting $ROOT_DMG_NAME from IPSW"
+            7z x out/ipsw/restore.ipsw "$ROOT_DMG_NAME" -oout/ipsw/extracted -y
+            rm -f out/ipsw/restore.ipsw
+            ROOT_DMG="out/ipsw/extracted/$ROOT_DMG_NAME"
             MNT_SRC="$(mktemp -d)"
             MNT_DST="$(mktemp -d)"
             hdiutil attach "$ROOT_DMG" -mountpoint "$MNT_SRC" -nobrowse -readonly -owners on
-            hdiutil create -size 32g -fs "Case-sensitive Journaled HFS+" -volname "B2LRoot" -layout NONE -type UDIF out/ipsw/ios26-userdata.hfs.dmg
-            mv out/ipsw/ios26-userdata.hfs.dmg out/ipsw/ios26-userdata.hfs.img
-            hdiutil attach out/ipsw/ios26-userdata.hfs.img -mountpoint "$MNT_DST" -nobrowse -owners on
+            truncate -s 24g out/ipsw/ios26-userdata.hfs.img
+            DEV_NODE="$(hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount out/ipsw/ios26-userdata.hfs.img | awk '{print $1; exit}')"
+            sudo newfs_hfs -s -J -v B2LRoot "$DEV_NODE"
+            hdiutil detach "$DEV_NODE" -force
+            hdiutil attach -imagekey diskimage-class=CRawDiskImage out/ipsw/ios26-userdata.hfs.img -mountpoint "$MNT_DST" -nobrowse -owners on
             sudo rsync -aHAX --numeric-ids "$MNT_SRC/" "$MNT_DST/" || true
             sudo python3 scripts/prepare-ios-root.py "$MNT_DST" --verify || true
             hdiutil detach "$MNT_DST" -force || true
             hdiutil detach "$MNT_SRC" -force || true
-            rm -rf out/ipsw/restore.ipsw out/ipsw/extracted
-          else
-            echo "::error::Set secrets.USERDATA_HFS_URL or secrets.IPSW_URL so build-userspace-bootstrap.py can read /System/Library/xpc/launchd.plist"
-            exit 1
+            rm -rf out/ipsw/extracted
           fi
           test -f out/ipsw/ios26-userdata.hfs.img
+          df -h
 
       - name: Fetch and prepare Mu-Silicium + beyond2lte platform overlay
         env:
