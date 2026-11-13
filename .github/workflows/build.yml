@@ -68,7 +68,7 @@ jobs:
           path: |
             out/kdk
             out/ipsw/ios26-userdata.hfs.img
-          key: b2l-ios265-25f71-v1
+          key: b2l-ios265-25f71-v2
 
       - name: Download and stage KDK (26.5 build 25F71)
         env:
@@ -182,6 +182,9 @@ jobs:
           test -f out/ipsw/ios26-userdata.hfs.img
           df -h
 
+      - name: Clean temporary IPSW extraction files to free disk space
+        run: rm -rf out/ipsw/extracted out/ipsw/*.ipsw
+
       - name: Save KDK and HFS userspace image cache
         if: always() && steps.cache-kdk-hfs.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
@@ -189,7 +192,7 @@ jobs:
           path: |
             out/kdk
             out/ipsw/ios26-userdata.hfs.img
-          key: b2l-ios265-25f71-v1
+          key: b2l-ios265-25f71-v2
 
       - name: Fetch and prepare Mu-Silicium + beyond2lte platform overlay
         env:
