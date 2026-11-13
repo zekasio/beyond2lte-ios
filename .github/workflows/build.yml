@@ -66,13 +66,19 @@ jobs:
           xcrun --sdk macosx --show-sdk-path
           xcrun --sdk iphoneos --show-sdk-path
 
+      - name: Free runner disk space for KDK and IPSW extraction
+        run: |
+          sudo rm -rf /Applications/Xcode_15*.app /Applications/Xcode_16*.app /Users/runner/Library/Android /usr/local/share/dotnet /opt/homebrew/Caches
+          df -h
+
       - name: Restore KDK and HFS userspace image cache
         id: cache-kdk-hfs
         uses: actions/cache/restore@v4
         with:
           path: |
             out/kdk
-          key: b2l-kdk-25f71-v3
+            out/ipsw/ios26-userdata.hfs.img
+          key: b2l-ios265-25f71-v4
 
       - name: Download and stage KDK (26.5 build 25F71)
         env:
@@ -110,7 +116,6 @@ jobs:
           test -d "$KDKROOT/System/Library/Frameworks/Kernel.framework"
 
       - name: Download or prepare IPSW / HFS userspace image
-        if: ${{ inputs.build_userspace == true }}
         env:
           USERDATA_HFS_URL: ${{ secrets.USERDATA_HFS_URL }}
           IPSW_URL: ${{ secrets.IPSW_URL }}
@@ -196,7 +201,8 @@ jobs:
         with:
           path: |
             out/kdk
-          key: b2l-kdk-25f71-v3
+            out/ipsw/ios26-userdata.hfs.img
+          key: b2l-ios265-25f71-v4
 
       - name: Fetch and prepare Mu-Silicium + beyond2lte platform overlay
         env:
