@@ -20,7 +20,6 @@ mkdir -p "$WORKSPACE/Conf"
 for t in tools_def build_rule target; do
   [[ -f "$WORKSPACE/Conf/$t.txt" ]] || cp "$EDK_TOOLS_PATH/Conf/$t.template" "$WORKSPACE/Conf/$t.txt"
 done
-cd "$WORKSPACE" && source "$WORKSPACE/Mu_Basecore/edksetup.sh" --reconfig || true
 export CONF_PATH="$WORKSPACE/Conf"
 mkdir -p "$WORKSPACE/B2LXnuPkg"
 rsync -a "$repo_root/uefi/" "$WORKSPACE/B2LXnuPkg/"
