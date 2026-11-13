@@ -6,6 +6,11 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      build_userspace:
+        description: Build HFS+ userspace image from IPSW (requires >25GB free runner disk)
+        required: false
+        type: boolean
+        default: false
       enable_touch:
         description: "Enable B2LTouchDxe in firmware profile"
         type: boolean
@@ -67,8 +72,7 @@ jobs:
         with:
           path: |
             out/kdk
-            out/ipsw/ios26-userdata.hfs.img
-          key: b2l-ios265-25f71-v2
+          key: b2l-kdk-25f71-v3
 
       - name: Download and stage KDK (26.5 build 25F71)
         env:
@@ -106,6 +110,7 @@ jobs:
           test -d "$KDKROOT/System/Library/Frameworks/Kernel.framework"
 
       - name: Download or prepare IPSW / HFS userspace image
+        if: ${{ inputs.build_userspace == true }}
         env:
           USERDATA_HFS_URL: ${{ secrets.USERDATA_HFS_URL }}
           IPSW_URL: ${{ secrets.IPSW_URL }}
@@ -191,8 +196,7 @@ jobs:
         with:
           path: |
             out/kdk
-            out/ipsw/ios26-userdata.hfs.img
-          key: b2l-ios265-25f71-v2
+          key: b2l-kdk-25f71-v3
 
       - name: Fetch and prepare Mu-Silicium + beyond2lte platform overlay
         env:
