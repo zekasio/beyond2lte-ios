@@ -78,6 +78,13 @@ jobs:
           path: out/kdk
           key: b2l-kdk-25f71-v3
 
+      - name: Restore 23G90 launchd.plist cache
+        id: cache-launchd
+        uses: actions/cache/restore@v4
+        with:
+          path: out/ipsw/launchd.plist
+          key: b2l-launchd-plist-23g90-v1
+
       - name: Download and stage KDK (26.5 build 25F71)
         env:
           KDK_URL: ${{ secrets.KDK_URL }}
@@ -245,10 +252,47 @@ jobs:
           fi
 
           rm -f out/ipsw/userdata.img.gz.part* out/ipsw/SHA256SUMS
+          python3 scripts/ci-prepare-ipsw.py extract-launchd out/ipsw/ios26-userdata.hfs.img out/ipsw/launchd.plist
           python3 scripts/ci-prepare-ipsw.py compress-split out/ipsw/ios26-userdata.hfs.img out/ipsw/userdata.img.gz.part
           cat out/ipsw/userdata.img.gz.part* | pigz -t
           rm -f out/ipsw/ios26-userdata.hfs.img
           df -h
+
+      - name: Save 23G90 launchd.plist cache
+        if: steps.cache-launchd.outputs.cache-hit != 'true' && (inputs.build_userspace == true || (github.event_name == 'push' && contains(github.event.head_commit.message, '[build-userspace]')))
+        uses: actions/cache/save@v4
+        with:
+          path: out/ipsw/launchd.plist
+          key: b2l-launchd-plist-23g90-v1
+
+      - name: Upload HFS userspace image parts A (1-3) and report
+        if: ${{ inputs.build_userspace == true || (github.event_name == 'push' && contains(github.event.head_commit.message, '[build-userspace]')) }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: beyond2lte-userdata-parts-a
+          compression-level: 0
+          path: |
+            out/ipsw/userdata.img.gz.part1
+            out/ipsw/userdata.img.gz.part2
+            out/ipsw/userdata.img.gz.part3
+            out/ipsw/SHA256SUMS
+            out/ipsw/prepare-root-report.json
+          if-no-files-found: error
+
+      - name: Upload HFS userspace image parts B (4+)
+        if: ${{ inputs.build_userspace == true || (github.event_name == 'push' && contains(github.event.head_commit.message, '[build-userspace]')) }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: beyond2lte-userdata-parts-b
+          compression-level: 0
+          path: |
+            out/ipsw/userdata.img.gz.part[4-9]
+            out/ipsw/userdata.img.gz.part1[0-9]
+          if-no-files-found: ignore
+
+      - name: Clean temporary userspace parts after upload
+        if: ${{ inputs.build_userspace == true || (github.event_name == 'push' && contains(github.event.head_commit.message, '[build-userspace]')) }}
+        run: rm -f out/ipsw/userdata.img.gz.part* && df -h
 
       - name: Fetch and prepare Mu-Silicium + beyond2lte platform overlay
         env:
@@ -394,28 +438,3 @@ jobs:
             out/ci-boot/manifest.json
             out/ci-boot/beyond2lte-xnu-boot.tar
           if-no-files-found: error
-
-      - name: Upload HFS userspace image parts A (1-3) and report
-        if: ${{ inputs.build_userspace == true || (github.event_name == 'push' && contains(github.event.head_commit.message, '[build-userspace]')) }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: beyond2lte-userdata-parts-a
-          compression-level: 0
-          path: |
-            out/ipsw/userdata.img.gz.part1
-            out/ipsw/userdata.img.gz.part2
-            out/ipsw/userdata.img.gz.part3
-            out/ipsw/SHA256SUMS
-            out/ipsw/prepare-root-report.json
-          if-no-files-found: error
-
-      - name: Upload HFS userspace image parts B (4+)
-        if: ${{ inputs.build_userspace == true || (github.event_name == 'push' && contains(github.event.head_commit.message, '[build-userspace]')) }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: beyond2lte-userdata-parts-b
-          compression-level: 0
-          path: |
-            out/ipsw/userdata.img.gz.part[4-9]
-            out/ipsw/userdata.img.gz.part1[0-9]
-          if-no-files-found: ignore

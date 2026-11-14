@@ -161,6 +161,39 @@ def compress_and_split(img_path, out_prefix, chunk_size=DEFAULT_CHUNK_BYTES):
     print(f"Total compressed size: {total} bytes across {len(sums)} parts")
 
 
+def extract_launchd_cache(img_path, out_path):
+    """Extract /System/Library/xpc/launchd.plist cleanly from an unmounted HFS+ image."""
+    import importlib.util
+
+    hfs_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pull-b2l-unified-logs.py")
+    spec = importlib.util.spec_from_file_location("hfsreader", hfs_script)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    reader = mod.ImageReader(img_path)
+    try:
+        volume = mod.Volume(reader)
+        target = "/System/Library/xpc/launchd.plist"
+        source = None
+        for entry, full, _, _ in volume.selected((target,)):
+            if full == target:
+                source = b"".join(
+                    mod.Fork(volume, entry["fork_raw"], entry["id"]).resolve(volume.overflow).content()
+                )
+                break
+        if source is None or not volume.unchanged():
+            raise RuntimeError("Missing/changed /System/Library/xpc/launchd.plist in HFS image")
+        parsed = plistlib.loads(source)
+        if "LaunchDaemons" not in parsed:
+            raise RuntimeError("Unexpected launchd.plist structure (missing LaunchDaemons)")
+        os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+        with open(out_path, "wb") as fh:
+            fh.write(source)
+        print(f"Extracted {target}: {len(source)} bytes sha256={hashlib.sha256(source).hexdigest()}")
+    finally:
+        reader.close()
+
+
 def verify_root(mounted_root):
     """Verify 23G90 build identity, dyld shared cache, dyld, and extensions.plist inside mounted_root."""
     import importlib.util
@@ -218,6 +251,10 @@ def main():
     p_ver = sub.add_parser("verify-root")
     p_ver.add_argument("mounted_root")
 
+    p_ld = sub.add_parser("extract-launchd")
+    p_ld.add_argument("img_path")
+    p_ld.add_argument("out_path")
+
     args = parser.parse_args()
     if args.cmd == "resolve-url":
         print(resolve_ipsw_url(args.build, args.version))
@@ -229,6 +266,8 @@ def main():
         compress_and_split(args.img_path, args.out_prefix)
     elif args.cmd == "verify-root":
         verify_root(args.mounted_root)
+    elif args.cmd == "extract-launchd":
+        extract_launchd_cache(args.img_path, args.out_path)
 
 
 if __name__ == "__main__":
