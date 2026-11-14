@@ -345,13 +345,21 @@ jobs:
 
           python3 scripts/package-boot.py --verify out/ci-boot/boot.img
 
-      - name: Upload boot.img and disk images as artifacts
+      - name: Upload boot.img and tar as fast artifact
         uses: actions/upload-artifact@v4
         with:
-          name: beyond2lte-xnu-artifacts
+          name: beyond2lte-boot-img
           path: |
             out/ci-boot/boot.img
             out/ci-boot/manifest.json
             out/ci-boot/beyond2lte-xnu-boot.tar
+          if-no-files-found: error
+
+      - name: Upload HFS userspace image artifact (when requested)
+        if: ${{ inputs.build_userspace == true }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: beyond2lte-xnu-artifacts
+          path: |
             out/ipsw/*.img
           if-no-files-found: error
