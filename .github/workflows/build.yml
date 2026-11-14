@@ -68,7 +68,7 @@ jobs:
 
       - name: Free runner disk space for KDK and IPSW extraction
         run: |
-          sudo rm -rf /Applications/Xcode_15*.app /Applications/Xcode_16*.app /Users/runner/Library/Android /usr/local/share/dotnet /opt/homebrew/Caches
+          /Users/runner/Library/Android /usr/local/share/dotnet /opt/homebrew/Caches
           df -h
 
       - name: Restore KDK and HFS userspace image cache
