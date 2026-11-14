@@ -84,35 +84,39 @@ jobs:
         env:
           KDK_URL: ${{ secrets.KDK_URL }}
         run: |
-          if [[ -z "$KDK_URL" ]]; then
-            KDK_URL="https://github.com/dortania/KdkSupportPkg/releases/download/25F71/Kernel_Debug_Kit_26.5_build_25F71.dmg"
-          fi
-          echo "Downloading KDK from $KDK_URL"
-          curl -fSL "$KDK_URL" -o out/kdk-download
-          if [[ "$KDK_URL" == *.dmg* ]] || hdiutil imageinfo out/kdk-download >/dev/null 2>&1; then
-            mv out/kdk-download out/kdk-download.dmg
-            MOUNT_DIR="$(mktemp -d)"
-            hdiutil attach out/kdk-download.dmg -mountpoint "$MOUNT_DIR" -nobrowse -readonly
-            trap 'hdiutil detach "$MOUNT_DIR" -force || true' EXIT
-            ls -la "$MOUNT_DIR"
-            pkg_root="$(mktemp -d)"
-            PKG_FILE="$(find "$MOUNT_DIR" -maxdepth 1 -name '*.pkg' | head -n 1)"
-            pkgutil --expand-full "$PKG_FILE" "$pkg_root/expanded" || true
-            for sub in KDK.pkg KDK_SDK.pkg; do
-              if [[ -d "$pkg_root/expanded/$sub/Payload" ]]; then
-                rsync -a "$pkg_root/expanded/$sub/Payload/" "$KDKROOT/"
-              elif [[ -f "$MOUNT_DIR/$sub" ]]; then
-                pkgutil --expand-full "$MOUNT_DIR/$sub" "$pkg_root/$sub"
-                rsync -a "$pkg_root/$sub/Payload/" "$KDKROOT/"
-              fi
-            done
-            if [[ ! -d "$KDKROOT/System/Library/Frameworks/Kernel.framework" ]] && [[ -d "$pkg_root/expanded/Payload" ]]; then
-              rsync -a "$pkg_root/expanded/Payload/" "$KDKROOT/"
-            fi
+          if [[ -d "$KDKROOT/System/Library/Frameworks/Kernel.framework" ]]; then
+            echo "Using cached KDK at $KDKROOT"
           else
-            tar -xf out/kdk-download -C "$KDKROOT"
+            if [[ -z "$KDK_URL" ]]; then
+              KDK_URL="https://github.com/dortania/KdkSupportPkg/releases/download/25F71/Kernel_Debug_Kit_26.5_build_25F71.dmg"
+            fi
+            echo "Downloading KDK from $KDK_URL"
+            curl -fSL "$KDK_URL" -o out/kdk-download
+            if [[ "$KDK_URL" == *.dmg* ]] || hdiutil imageinfo out/kdk-download >/dev/null 2>&1; then
+              mv out/kdk-download out/kdk-download.dmg
+              MOUNT_DIR="$(mktemp -d)"
+              hdiutil attach out/kdk-download.dmg -mountpoint "$MOUNT_DIR" -nobrowse -readonly
+              trap 'hdiutil detach "$MOUNT_DIR" -force || true' EXIT
+              ls -la "$MOUNT_DIR"
+              pkg_root="$(mktemp -d)"
+              PKG_FILE="$(find "$MOUNT_DIR" -maxdepth 1 -name '*.pkg' | head -n 1)"
+              pkgutil --expand-full "$PKG_FILE" "$pkg_root/expanded" || true
+              for sub in KDK.pkg KDK_SDK.pkg; do
+                if [[ -d "$pkg_root/expanded/$sub/Payload" ]]; then
+                  rsync -a "$pkg_root/expanded/$sub/Payload/" "$KDKROOT/"
+                elif [[ -f "$MOUNT_DIR/$sub" ]]; then
+                  pkgutil --expand-full "$MOUNT_DIR/$sub" "$pkg_root/$sub"
+                  rsync -a "$pkg_root/$sub/Payload/" "$KDKROOT/"
+                fi
+              done
+              if [[ ! -d "$KDKROOT/System/Library/Frameworks/Kernel.framework" ]] && [[ -d "$pkg_root/expanded/Payload" ]]; then
+                rsync -a "$pkg_root/expanded/Payload/" "$KDKROOT/"
+              fi
+            else
+              tar -xf out/kdk-download -C "$KDKROOT"
+            fi
+            rm -f out/kdk-download out/kdk-download.dmg
           fi
-          rm -f out/kdk-download out/kdk-download.dmg
           test -d "$KDKROOT/System/Library/Frameworks/Kernel.framework"
 
       - name: Download or prepare IPSW / HFS userspace image
@@ -122,7 +126,9 @@ jobs:
         run: |
           df -h
           mkdir -p out/ipsw
-          if [[ -n "$USERDATA_HFS_URL" ]]; then
+          if [[ -s out/ipsw/ios26-userdata.hfs.img ]]; then
+            echo "Using cached HFS userspace image at out/ipsw/ios26-userdata.hfs.img"
+          elif [[ -n "$USERDATA_HFS_URL" ]]; then
             curl -fSL "$USERDATA_HFS_URL" -o out/ipsw/ios26-userdata.hfs.img
           else
             if [[ -z "$IPSW_URL" ]]; then
@@ -207,7 +213,7 @@ jobs:
       - name: Fetch and prepare Mu-Silicium + beyond2lte platform overlay
         env:
           MU_SILICIUM_URL: ${{ secrets.MU_SILICIUM_URL || 'https://github.com/Project-Silicium/Mu-Silicium.git' }}
-          BEYOND2LTE_UEFI_URL: ${{ secrets.BEYOND2LTE_UEFI_URL || 'https://github.com/orhunnx/UEFI_beyond2lte.git' }}
+          BEYOND2LTE_UEFI_URL: ${{ secrets.BEYOND2LTE_UEFI_URL || 'https://github.com/orhunnx/beyond2lte-uefi.git' }}
         run: |
           git clone "$MU_SILICIUM_URL" "$MU_WORK_TREE"
           git -C "$MU_WORK_TREE" checkout --detach "$MU_SILICIUM_COMMIT"
@@ -215,7 +221,56 @@ jobs:
           actual_basecore="$(git -C "$MU_WORK_TREE/Mu_Basecore" rev-parse HEAD)"
           echo "Mu_Basecore at $actual_basecore (expected $MU_BASECORE_COMMIT)"
 
+          if [[ ! -d "$MU_WORK_TREE/Silicium-ACPI/SoCs" ]]; then
+            rm -rf "$MU_WORK_TREE/Silicium-ACPI"
+            git clone https://github.com/Project-Silicium/Silicium-ACPI.git "$MU_WORK_TREE/Silicium-ACPI"
+          fi
+
+          if [[ ! -f "$MU_WORK_TREE/Platforms/Samsung/beyond2ltePkg/beyond2lte.dsc" ]]; then
+            rm -rf out/uefi-beyond2lte
+            git clone "$BEYOND2LTE_UEFI_URL" out/uefi-beyond2lte
+            git -C out/uefi-beyond2lte fetch --all --tags || true
+            if git -C out/uefi-beyond2lte cat-file -e "${BEYOND2LTE_UEFI_COMMIT}^{commit}" 2>/dev/null; then
+              git -C out/uefi-beyond2lte checkout --detach "$BEYOND2LTE_UEFI_COMMIT"
+            elif git -C out/uefi-beyond2lte rev-parse --verify -q origin/codex/touch-from-8549bfa >/dev/null; then
+              git -C out/uefi-beyond2lte checkout --detach origin/codex/touch-from-8549bfa
+            fi
+
+            if [[ -d out/uefi-beyond2lte/mu-silicium-overlay ]]; then
+              rsync -a out/uefi-beyond2lte/mu-silicium-overlay/ "$MU_WORK_TREE/"
+            fi
+            if [[ -d out/uefi-beyond2lte/silicium-acpi-overlay ]]; then
+              rsync -a out/uefi-beyond2lte/silicium-acpi-overlay/ "$MU_WORK_TREE/Silicium-ACPI/"
+            fi
+            if [[ -d out/uefi-beyond2lte/Platforms/Samsung/beyond2ltePkg ]]; then
+              mkdir -p "$MU_WORK_TREE/Platforms/Samsung"
+              rsync -a out/uefi-beyond2lte/Platforms/Samsung/beyond2ltePkg "$MU_WORK_TREE/Platforms/Samsung/"
+            fi
+            if [[ -d out/uefi-beyond2lte/Silicon/Samsung ]]; then
+              mkdir -p "$MU_WORK_TREE/Silicon/Samsung"
+              rsync -a out/uefi-beyond2lte/Silicon/Samsung/ "$MU_WORK_TREE/Silicon/Samsung/"
+            fi
+            if [[ -d out/uefi-beyond2lte/Resources ]]; then
+              mkdir -p "$MU_WORK_TREE/Resources"
+              rsync -a out/uefi-beyond2lte/Resources/ "$MU_WORK_TREE/Resources/"
+            fi
+            if [[ -d out/uefi-beyond2lte/BootShim ]]; then
+              mkdir -p "$MU_WORK_TREE/BootShim"
+              rsync -a out/uefi-beyond2lte/BootShim/ "$MU_WORK_TREE/BootShim/"
+            fi
+            if [[ -d out/uefi-beyond2lte/Silicium-ACPI ]]; then
+              mkdir -p "$MU_WORK_TREE/Silicium-ACPI"
+              rsync -a out/uefi-beyond2lte/Silicium-ACPI/ "$MU_WORK_TREE/Silicium-ACPI/"
+            fi
+            rm -rf out/uefi-beyond2lte
+          fi
+
           ls -la "$MU_WORK_TREE/Platforms/Samsung/"
+          test -f "$MU_WORK_TREE/Platforms/Samsung/beyond2ltePkg/beyond2lte.dsc"
+          test -d "$MU_WORK_TREE/Silicon/Samsung"
+          test -d "$MU_WORK_TREE/Silicium-ACPI"
+          test -f "$MU_WORK_TREE/Resources/DTBs/beyond2lte.dtb"
+          test -f "$MU_WORK_TREE/BootShim/BootShim.S"
 
           make -C "$MU_WORK_TREE/Mu_Basecore/BaseTools/Source/C" -j"$BUILD_JOBS"
 
