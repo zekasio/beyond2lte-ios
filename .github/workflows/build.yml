@@ -125,7 +125,7 @@ jobs:
           key: b2l-kdk-25f71-v3
 
       - name: Build and verify HFS+ userspace image from iOS 26.6.2 (23G90) IPSW
-        if: ${{ inputs.build_userspace == true }}
+        if: ${{ inputs.build_userspace == true || (github.event_name == 'push' && contains(github.event.head_commit.message, '[build-userspace]')) }}
         env:
           USERDATA_HFS_URL: ${{ secrets.USERDATA_HFS_URL }}
           IPSW_URL: ${{ secrets.IPSW_URL }}
@@ -396,7 +396,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload HFS userspace image parts A (1-3) and report
-        if: ${{ inputs.build_userspace == true }}
+        if: ${{ inputs.build_userspace == true || (github.event_name == 'push' && contains(github.event.head_commit.message, '[build-userspace]')) }}
         uses: actions/upload-artifact@v4
         with:
           name: beyond2lte-userdata-parts-a
@@ -410,7 +410,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload HFS userspace image parts B (4+)
-        if: ${{ inputs.build_userspace == true }}
+        if: ${{ inputs.build_userspace == true || (github.event_name == 'push' && contains(github.event.head_commit.message, '[build-userspace]')) }}
         uses: actions/upload-artifact@v4
         with:
           name: beyond2lte-userdata-parts-b
