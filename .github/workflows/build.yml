@@ -46,7 +46,7 @@ jobs:
       - name: Install toolchain dependencies
         run: |
           brew update
-          brew install llvm lld nasm acpica rsync jq blacktop/tap/ipsw
+          brew install llvm lld nasm acpica rsync jq pigz blacktop/tap/ipsw
           LLVM_PREFIX="$(brew --prefix llvm)"
           LLD_PREFIX="$(brew --prefix lld)"
           mkdir -p out/llvm-bin
@@ -71,14 +71,12 @@ jobs:
           sudo rm -rf /Users/runner/Library/Android /usr/local/share/dotnet /opt/homebrew/Caches
           df -h
 
-      - name: Restore KDK and HFS userspace image cache
-        id: cache-kdk-hfs
+      - name: Restore KDK cache
+        id: cache-kdk
         uses: actions/cache/restore@v4
         with:
-          path: |
-            out/kdk
-            out/ipsw/ios26-userdata.hfs.img
-          key: b2l-ios265-25f71-v4
+          path: out/kdk
+          key: b2l-kdk-25f71-v3
 
       - name: Download and stage KDK (26.5 build 25F71)
         env:
@@ -119,96 +117,138 @@ jobs:
           fi
           test -d "$KDKROOT/System/Library/Frameworks/Kernel.framework"
 
-      - name: Download or prepare IPSW / HFS userspace image
+      - name: Save KDK cache
+        if: always() && steps.cache-kdk.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: out/kdk
+          key: b2l-kdk-25f71-v3
+
+      - name: Build and verify HFS+ userspace image from iOS 26.6.2 (23G90) IPSW
+        if: ${{ inputs.build_userspace == true }}
         env:
           USERDATA_HFS_URL: ${{ secrets.USERDATA_HFS_URL }}
           IPSW_URL: ${{ secrets.IPSW_URL }}
         run: |
+          export PATH="/opt/homebrew/bin:$PATH"
           df -h
           mkdir -p out/ipsw
-          if [[ -s out/ipsw/ios26-userdata.hfs.img ]]; then
-            echo "Using cached HFS userspace image at out/ipsw/ios26-userdata.hfs.img"
-          elif [[ -n "$USERDATA_HFS_URL" ]]; then
+          RSYNC_BIN="$(command -v rsync)"
+          echo "Using rsync: $RSYNC_BIN ($("$RSYNC_BIN" --version | head -n 1))"
+
+          attach_ro_dmg() {
+            local dmg="$1"
+            local mnt="$2"
+            if hdiutil attach "$dmg" -mountpoint "$mnt" -nobrowse -readonly -owners on; then
+              return 0
+            fi
+            hdiutil attach -imagekey diskimage-class=CRawDiskImage "$dmg" -mountpoint "$mnt" -nobrowse -readonly -owners on
+          }
+
+          if [[ -n "$USERDATA_HFS_URL" ]]; then
             curl -fSL "$USERDATA_HFS_URL" -o out/ipsw/ios26-userdata.hfs.img
           else
             if [[ -z "$IPSW_URL" ]]; then
-              IPSW_URL="$(curl -fsSL "https://api.ipsw.me/v4/device/iPhone17,2?type=ipsw" | python3 -c "import sys,json; d=json.load(sys.stdin); print(next(f['url'] for f in d['firmwares'] if f['version']=='26.5'))")"
+              IPSW_URL="$(python3 scripts/ci-prepare-ipsw.py resolve-url --build 23G90 --version 26.6.2)"
             fi
-            echo "Resolving rootfs DMG from $IPSW_URL"
-            mkdir -p out/ipsw/extracted
-            ROOT_FILE="$(python3 -c '
-            import io, os, shutil, sys, urllib.request, zipfile
+            echo "Resolved 23G90 IPSW URL: $IPSW_URL"
 
-            url, out_dir = sys.argv[1], sys.argv[2]
+            MANIFEST_JSON="$(python3 scripts/ci-prepare-ipsw.py manifest "$IPSW_URL")"
+            echo "BuildManifest images: $MANIFEST_JSON"
 
-            class RemoteFile(io.RawIOBase):
-                def __init__(self, url, size):
-                    self.url, self.size, self.pos = url, size, 0
-                def readable(self): return True
-                def seekable(self): return True
-                def seek(self, offset, whence=0):
-                    if whence == 0: self.pos = offset
-                    elif whence == 1: self.pos += offset
-                    elif whence == 2: self.pos = self.size + offset
-                    return self.pos
-                def tell(self): return self.pos
-                def read(self, n=-1):
-                    if n == -1: n = self.size - self.pos
-                    if n <= 0 or self.pos >= self.size: return b""
-                    end = min(self.size - 1, self.pos + n - 1)
-                    req = urllib.request.Request(self.url, headers={"Range": f"bytes={self.pos}-{end}"})
-                    with urllib.request.urlopen(req) as r:
-                        data = r.read()
-                    self.pos += len(data)
-                    return data
+            OS_ENTRY="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["OS"])' "$MANIFEST_JSON")"
+            SYSOS_ENTRY="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["SystemOS"])' "$MANIFEST_JSON")"
+            APPOS_ENTRY="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["AppOS"])' "$MANIFEST_JSON")"
 
-            with urllib.request.urlopen(urllib.request.Request(url, method="HEAD")) as r:
-                size = int(r.headers["Content-Length"])
-            with zipfile.ZipFile(RemoteFile(url, size)) as zf:
-                dmgs = [i for i in zf.infolist() if i.filename.endswith((".dmg", ".dmg.aea"))]
-                best = max(dmgs, key=lambda i: i.file_size)
-                out_path = os.path.join(out_dir, os.path.basename(best.filename))
-                with zf.open(best) as src, open(out_path, "wb") as dst:
-                    shutil.copyfileobj(src, dst, length=8 * 1024 * 1024)
-                print(out_path)
-            ' "$IPSW_URL" out/ipsw/extracted)"
-            echo "Extracted $ROOT_FILE"
-            if [[ "$ROOT_FILE" == *.aea ]]; then
-              ipsw fw aea "$ROOT_FILE" -o out/ipsw/extracted
-              rm -f "$ROOT_FILE"
-              ROOT_DMG="$(find out/ipsw/extracted -maxdepth 2 -name '*.dmg' | head -n 1)"
-            else
-              ROOT_DMG="$ROOT_FILE"
-            fi
-            test -f "$ROOT_DMG"
-            MNT_SRC="$(mktemp -d)"
-            MNT_DST="$(mktemp -d)"
-            hdiutil attach "$ROOT_DMG" -mountpoint "$MNT_SRC" -nobrowse -readonly -owners on
-            truncate -s 24g out/ipsw/ios26-userdata.hfs.img
+            rm -f out/ipsw/ios26-userdata.hfs.img
+            truncate -s 32g out/ipsw/ios26-userdata.hfs.img
             DEV_NODE="$(hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount out/ipsw/ios26-userdata.hfs.img | awk '{print $1; exit}')"
             sudo newfs_hfs -s -J -v B2LRoot "$DEV_NODE"
-            hdiutil detach "$DEV_NODE" -force
+            hdiutil detach "$DEV_NODE"
+
+            MNT_DST="$(mktemp -d)"
+            MNT_SRC="$(mktemp -d)"
+            trap 'hdiutil detach "$MNT_SRC" -force 2>/dev/null || true; hdiutil detach "$MNT_DST" -force 2>/dev/null || true' EXIT
+
             hdiutil attach -imagekey diskimage-class=CRawDiskImage out/ipsw/ios26-userdata.hfs.img -mountpoint "$MNT_DST" -nobrowse -owners on
-            sudo rsync -aHAX --numeric-ids "$MNT_SRC/" "$MNT_DST/" || true
-            sudo python3 scripts/prepare-ios-root.py "$MNT_DST" --verify || true
-            hdiutil detach "$MNT_DST" -force || true
-            hdiutil detach "$MNT_SRC" -force || true
+            sudo mdutil -i off "$MNT_DST" >/dev/null 2>&1 || true
+
+            extract_and_copy() {
+              local label="$1"
+              local zip_entry="$2"
+              local dst_subpath="$3"
+              local work_dir="out/ipsw/extracted/$label"
+              rm -rf "$work_dir"
+              mkdir -p "$work_dir"
+              local raw_file
+              raw_file="$(python3 scripts/ci-prepare-ipsw.py extract "$IPSW_URL" "$zip_entry" "$work_dir")"
+              echo "[$label] Extracted $raw_file"
+              local dmg_file
+              if [[ "$raw_file" == *.aea ]]; then
+                ipsw fw aea "$raw_file" -o "$work_dir"
+                rm -f "$raw_file"
+                dmg_file="$(find "$work_dir" -maxdepth 2 -name '*.dmg' | head -n 1)"
+              else
+                dmg_file="$raw_file"
+              fi
+              test -f "$dmg_file"
+              attach_ro_dmg "$dmg_file" "$MNT_SRC"
+              local target="$MNT_DST"
+              if [[ -n "$dst_subpath" ]]; then
+                target="$MNT_DST/$dst_subpath"
+                sudo mkdir -p "$target"
+              fi
+              echo "[$label] Copying from $MNT_SRC to $target"
+              sudo "$RSYNC_BIN" -aH --numeric-ids \
+                --exclude='/.Spotlight-V100' \
+                --exclude='/.Trashes' \
+                --exclude='/.fseventsd' \
+                --exclude='/.TemporaryItems' \
+                --exclude='/.DocumentRevisions-V100' \
+                --exclude='/.vol' \
+                "$MNT_SRC/" "$target/"
+              hdiutil detach "$MNT_SRC"
+              rm -rf "$work_dir"
+              df -h "$MNT_DST"
+            }
+
+            extract_and_copy "os" "$OS_ENTRY" ""
+            test ! -L "$MNT_DST/private/preboot"
+            test ! -L "$MNT_DST/private/preboot/Cryptexes"
+            test ! -L "$MNT_DST/private/preboot/Cryptexes/OS"
+            test ! -L "$MNT_DST/private/preboot/Cryptexes/App"
+            extract_and_copy "systemos" "$SYSOS_ENTRY" "private/preboot/Cryptexes/OS"
+            extract_and_copy "appos" "$APPOS_ENTRY" "private/preboot/Cryptexes/App"
+
+            sudo python3 scripts/prepare-ios-root.py "$MNT_DST" --report out/ipsw/prepare-root-report.json
+            python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d.pop("actions",None); print(json.dumps(d,indent=2))' out/ipsw/prepare-root-report.json
+            sudo python3 scripts/prepare-ios-root.py "$MNT_DST" --verify
+            sudo python3 scripts/ci-prepare-ipsw.py verify-root "$MNT_DST"
+            df -h "$MNT_DST"
+
+            sync
+            for attempt in 1 2 3 4 5; do
+              if hdiutil detach "$MNT_DST"; then
+                break
+              fi
+              if [[ "$attempt" -eq 5 ]]; then
+                exit 1
+              fi
+              sleep 2
+            done
+            trap - EXIT
             rm -rf out/ipsw/extracted
+
+            CHK_NODE="$(hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount -readonly out/ipsw/ios26-userdata.hfs.img | awk '{print $1; exit}')"
+            sudo fsck_hfs -fn "$CHK_NODE"
+            hdiutil detach "$CHK_NODE"
           fi
-          test -f out/ipsw/ios26-userdata.hfs.img
+
+          rm -f out/ipsw/userdata.img.gz.part* out/ipsw/SHA256SUMS
+          python3 scripts/ci-prepare-ipsw.py compress-split out/ipsw/ios26-userdata.hfs.img out/ipsw/userdata.img.gz.part
+          cat out/ipsw/userdata.img.gz.part* | pigz -t
+          rm -f out/ipsw/ios26-userdata.hfs.img
           df -h
-
-      - name: Clean temporary IPSW extraction files to free disk space
-        run: rm -rf out/ipsw/extracted out/ipsw/*.ipsw
-
-      - name: Save KDK and HFS userspace image cache
-        if: always() && steps.cache-kdk-hfs.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            out/kdk
-            out/ipsw/ios26-userdata.hfs.img
-          key: b2l-ios265-25f71-v4
 
       - name: Fetch and prepare Mu-Silicium + beyond2lte platform overlay
         env:
@@ -355,11 +395,27 @@ jobs:
             out/ci-boot/beyond2lte-xnu-boot.tar
           if-no-files-found: error
 
-      - name: Upload HFS userspace image artifact (when requested)
+      - name: Upload HFS userspace image parts A (1-3) and report
         if: ${{ inputs.build_userspace == true }}
         uses: actions/upload-artifact@v4
         with:
-          name: beyond2lte-xnu-artifacts
+          name: beyond2lte-userdata-parts-a
+          compression-level: 0
           path: |
-            out/ipsw/*.img
+            out/ipsw/userdata.img.gz.part1
+            out/ipsw/userdata.img.gz.part2
+            out/ipsw/userdata.img.gz.part3
+            out/ipsw/SHA256SUMS
+            out/ipsw/prepare-root-report.json
           if-no-files-found: error
+
+      - name: Upload HFS userspace image parts B (4+)
+        if: ${{ inputs.build_userspace == true }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: beyond2lte-userdata-parts-b
+          compression-level: 0
+          path: |
+            out/ipsw/userdata.img.gz.part[4-9]
+            out/ipsw/userdata.img.gz.part1[0-9]
+          if-no-files-found: ignore
