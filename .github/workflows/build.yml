@@ -15,6 +15,11 @@ on:
         description: "Enable B2LTouchDxe in firmware profile"
         type: boolean
         default: true
+      runner:
+        description: "Runner label to build on (hosted macOS runners are capacity-starved)"
+        required: false
+        type: string
+        default: macos-15-intel
 
 env:
   XNU_COMMIT: ac9718fb1af618d5ce8678d0dc6e8a58f252216f
@@ -25,10 +30,21 @@ env:
   BEYOND2LTE_UEFI_COMMIT: 48add5bb03ab6f7ee4eb5aa04a30366e6dde6ba3
 
 jobs:
+  apfs-host-tests:
+    name: APFS host parser tests (ASan/UBSan)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run NXSB, checkpoint, and OMAP parser tests
+        run: |
+          bash scripts/test-apfs-probe.sh
+          sh scripts/test-apfs-checkpoint.sh
+
   build:
     name: Build XNU, UEFI Firmware, and boot.img
-    runs-on: macos-15
-    timeout-minutes: 120
+    runs-on: ${{ inputs.runner || 'macos-15-intel' }}
+    timeout-minutes: 350
 
     steps:
       - name: Checkout beyond2lte-ios
@@ -43,10 +59,42 @@ jobs:
           echo "MU_WORK_TREE=$GITHUB_WORKSPACE/out/mu" >> "$GITHUB_ENV"
           echo "BUILD_JOBS=$(sysctl -n hw.ncpu)" >> "$GITHUB_ENV"
 
+      - name: Cache Homebrew bottle downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/Homebrew
+          key: b2l-brew-dl-${{ runner.os }}-${{ runner.arch }}-v1
+
       - name: Install toolchain dependencies
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+          HOMEBREW_NO_ENV_HINTS: "1"
+          HOMEBREW_NO_ANALYTICS: "1"
         run: |
-          brew update
-          brew install llvm lld nasm acpica rsync jq pigz blacktop/tap/ipsw
+          # Do not run `brew update`: it stalled for two hours on the Intel
+          # runner and the job was killed in this step before compiling.
+          set -euo pipefail
+          for f in llvm lld nasm acpica rsync jq pigz; do
+            echo "::group::brew install $f"
+            /usr/bin/time -p brew install "$f" || /usr/bin/time -p brew install "$f"
+            echo "::endgroup::"
+          done
+          # ipsw is only needed to unpack an IPSW for the userspace image and is
+          # a *cask* in blacktop/tap since the tap became untrusted by default
+          # ("Skipping blacktop/tap because it is not trusted"), so installing it
+          # unconditionally aborted the whole job.
+          if [[ "${{ inputs.build_userspace }}" == "true" ]]; then
+            echo "::group::brew install blacktop/tap/ipsw"
+            brew trust blacktop/tap || true
+            /usr/bin/time -p brew install --cask blacktop/tap/ipsw \
+              || /usr/bin/time -p brew install blacktop/tap/ipsw
+            vendor/bin/ipsw version 2>/dev/null || ipsw version
+            echo "::endgroup::"
+          else
+            echo "ipsw not needed (build_userspace=false)"
+          fi
+          brew link --overwrite --force llvm lld >/dev/null 2>&1 || true
           LLVM_PREFIX="$(brew --prefix llvm)"
           LLD_PREFIX="$(brew --prefix lld)"
           mkdir -p out/llvm-bin
@@ -84,6 +132,21 @@ jobs:
         with:
           path: out/ipsw/launchd.plist
           key: b2l-launchd-plist-23g90-v1
+
+      # prepare-xnu.sh aborts with "Missing both out/ipsw/ios26-userdata.hfs.img
+      # and out/ipsw/launchd.plist" when the IPSW is not extracted, which would
+      # kill the build even with build_userspace=false. The launch cache is a
+      # verbatim copy of /System/Library/xpc/launchd.plist from the prepared
+      # 23G90 image, so it is carried in the repository and cached from then on.
+      - name: Seed the launchd cache when the IPSW is not extracted
+        run: |
+          mkdir -p out/ipsw
+          if [[ -s out/ipsw/launchd.plist ]]; then
+            echo "launchd.plist already present ($(stat -f%z out/ipsw/launchd.plist) bytes)"
+          else
+            cp ci/launchd.plist out/ipsw/launchd.plist
+            echo "seeded out/ipsw/launchd.plist ($(stat -f%z out/ipsw/launchd.plist) bytes)"
+          fi
 
       - name: Download and stage KDK (26.5 build 25F71)
         env:
@@ -259,7 +322,7 @@ jobs:
           df -h
 
       - name: Save 23G90 launchd.plist cache
-        if: steps.cache-launchd.outputs.cache-hit != 'true' && (inputs.build_userspace == true || (github.event_name == 'push' && contains(github.event.head_commit.message, '[build-userspace]')))
+        if: steps.cache-launchd.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: out/ipsw/launchd.plist
