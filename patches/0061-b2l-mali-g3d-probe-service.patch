@@ -1,0 +1,18 @@
+--- a/iokit/conf/files
++++ b/iokit/conf/files
+@@ -185,3 +185,5 @@
+ iokit/Kernel/arm/B2LAMFI.cpp optional iokitcpp b2l
+ 
+ iokit/Kernel/arm/B2LPower.cpp optional iokitcpp b2l
++
++iokit/Kernel/arm/B2LGPU.cpp optional iokitcpp b2l
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -85,6 +85,7 @@
+     "     'IOMatchCategory' = AppleMobileFileIntegrity;"
+     "   },"
+     "   {'IOClass'=B2LPower;'IOProviderClass'=IOResources;'IOMatchCategory'=B2LPower;},"
++    "   {'IOClass'=B2LGPU;'IOProviderClass'=IOResources;'IOMatchCategory'=B2LGPU;},"
+ #endif
+     "   {"
+     "     'IOClass'         = IOPanicPlatform;"

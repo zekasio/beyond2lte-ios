@@ -96,6 +96,13 @@ When the S10+ (`SM-G975F`) is connected to a local PC running `agy` CLI for iter
 5. If `(g3d_status & 0x1) == 0`, enable the `pd-embedded_g3d` domain in `Mu-Silicium` UEFI before `ExitBootServices` (or via Exynos PMU `G3D_CONFIGURATION` at `0x15862100 = 0x1` followed by polling `0x15862104 & 0x1`) so `G3D` stays powered at `260 MHz` (`gpu_dvfs_start_clock`) across XNU handoff.
 
 ### Phase 2: Mali-G76 Soft Reset, L2/Shader Power-Up, and Stage-1 MMU (`B2LGPU.cpp`)
+> **Superseded detail:** the implemented probe uses the AArch64 4 KiB MMU
+> mode rather than LPAE, runs its first job on slot 0 with a NULL descriptor
+> in a private address space (not against an `IOSurface`), and waits for
+> `AS_STATUS_AS_ACTIVE` to clear rather than for it to assert. See
+> [gpu-accel-review.md](gpu-accel-review.md) for the encodings taken from
+> `b_r19p0` and for the current state of this phase.
+
 1. Issue `GPU_COMMAND = 0x01` (`SOFT_RESET`) and poll `GPU_IRQ_RAWSTAT` bit `8` (`RESET_COMPLETED`).
 2. Power on `L2_PRESENT_LO`, `TILER_PRESENT_LO`, and `SHADER_PRESENT_LO` via `L2_PWRON_LO` (`+0x1A0`), `TILER_PWRON_LO` (`+0x190`), and `SHADER_PWRON_LO` (`+0x180`); poll `L2_READY_LO` / `TILER_READY_LO` / `SHADER_READY_LO`.
 3. Configure `AS0` (`MMU_BASE + 0x400`) in `AARCH64_4K` (`LPAE`) mode pointing at a pinned XNU physical page table mapping a test `B2LSurface` (`IOSurface`) buffer, and verify a minimal `WRITE_VALUE` job descriptor on `JS1` (`JOB_CONTROL_BASE + 0x800 + 0x80`) completes and raises GICv2 INTID `320` (`JOB` IRQ).
